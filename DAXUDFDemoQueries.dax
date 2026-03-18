@@ -1,0 +1,243 @@
+﻿-- ============================================================
+-- DAX UDF PRESENTATION
+-- Model: Contoso 10K
+-- ============================================================
+
+
+-- ============================================================
+-- DEMO 1: YOUR FIRST FUNCTION
+-- Expected result: 30
+-- ============================================================
+
+DEFINE
+
+FUNCTION SumTwoNumbers = ( A, B ) => A + B
+
+EVALUATE
+    { SumTwoNumbers ( 10, 20 ) }
+
+
+-- ============================================================
+-- DEMO 2: TYPED PARAMETERS
+-- Expected result: 5 (not 6!)
+-- Each param is cast to INT individually before addition
+-- ============================================================
+
+DEFINE
+FUNCTION SumTwoNumbers = (
+    a : INT64 VAL,
+    b : INT64 VAL
+) => a + b
+
+EVALUATE
+{
+    SumTwoNumbers( 3.4, 2.4 )
+}
+
+
+-- ============================================================
+-- DEMO 3a: COMPUTEFORRED — BROKEN (VAL)
+-- Expected result: $4,373,105.53 (all colors, not just Red)
+-- The filter has no effect because amount is pre-evaluated
+-- ============================================================
+
+DEFINE
+
+FUNCTION ComputeForRed = ( amount ) =>
+    CALCULATE (
+        amount,
+        'Product'[Color] = "Red"
+    )
+
+EVALUATE
+{ ComputeForRed( [Sales Amount] ) }
+
+
+-- ============================================================
+-- DEMO 3b: COMPUTEFORRED — FIXED (EXPR)
+-- Expected result: $144,468.51 (Red only)
+-- ============================================================
+
+DEFINE
+
+FUNCTION ComputeForRed = ( amountExpr : EXPR ) =>
+    CALCULATE (
+        amountExpr,
+        'Product'[Color] = "Red"
+    )
+
+EVALUATE
+{ ComputeForRed( [Sales Amount] ) }
+
+
+-- ============================================================
+-- DEMO 4a: BESTCUSTOMERS — WORKING (measure reference)
+-- Expected result: table of above-average customers
+-- ============================================================
+
+DEFINE
+FUNCTION BestCustomers = ( metricExpr : EXPR ) =>
+    VAR CustomersAndMetric =
+        ADDCOLUMNS (
+            Customer,
+            "@Metric", metricExpr
+        )
+    VAR AverageMetric = AVERAGEX ( CustomersAndMetric, [@Metric] )
+    VAR BestCustomersResult =
+        FILTER (
+            CustomersAndMetric,
+            [@Metric] > AverageMetric
+        )
+    RETURN
+        BestCustomersResult
+
+EVALUATE
+    BestCustomers( [Sales Amount] )
+
+
+-- ============================================================
+-- DEMO 4b: BESTCUSTOMERS — BROKEN (raw SUMX, no CALCULATE)
+-- Expected result: 0 rows (empty table)
+-- Context transition doesn't happen without CALCULATE
+-- ============================================================
+
+DEFINE
+FUNCTION BestCustomers = ( metricExpr : EXPR ) =>
+    VAR CustomersAndMetric =
+        ADDCOLUMNS (
+            Customer,
+            "@Metric", metricExpr
+        )
+    VAR AverageMetric = AVERAGEX ( CustomersAndMetric, [@Metric] )
+    VAR BestCustomersResult =
+        FILTER (
+            CustomersAndMetric,
+            [@Metric] > AverageMetric
+        )
+    RETURN
+        BestCustomersResult
+
+EVALUATE
+    BestCustomers( SUMX ( Sales, Sales[Quantity] * Sales[Net Price] ) )
+
+
+-- ============================================================
+-- DEMO 4c: BESTCUSTOMERS — FIXED (CALCULATE wrapping)
+-- Expected result: same customer count as Demo 4a
+-- Works with both measure references AND raw expressions
+-- ============================================================
+
+DEFINE
+FUNCTION BestCustomers = ( metricExpr : EXPR ) =>
+    VAR CustomersAndMetric =
+        ADDCOLUMNS (
+            Customer,
+            "@Metric", CALCULATE ( metricExpr )
+        )
+    VAR AverageMetric = AVERAGEX ( CustomersAndMetric, [@Metric] )
+    VAR BestCustomersResult =
+        FILTER (
+            CustomersAndMetric,
+            [@Metric] > AverageMetric
+        )
+    RETURN
+        BestCustomersResult
+
+EVALUATE
+    BestCustomers( SUMX ( Sales, Sales[Quantity] * Sales[Net Price] ) )
+
+
+-- ============================================================
+-- DEMO 5: REUSABLE RANKING FUNCTION
+-- One function, swap in any metric — rankings change
+-- Uses both TABLE VAL and EXPR parameters
+-- Games & Toys is #8 by revenue but #3 by quantity!
+-- ============================================================
+
+DEFINE
+
+FUNCTION RankByMetric = (
+    dimensionTable : TABLE VAL,
+    metricExpr : EXPR
+) =>
+    VAR CurrentValue = CALCULATE( metricExpr )
+    VAR BetterCount =
+        COUNTROWS(
+            FILTER(
+                dimensionTable,
+                CALCULATE( metricExpr ) > CurrentValue
+            )
+        )
+    RETURN
+        BetterCount + 1
+
+EVALUATE
+ADDCOLUMNS(
+    VALUES( 'Product'[Category] ),
+    "Sales", [Sales Amount],
+    "Rank by Sales", RankByMetric( VALUES( 'Product'[Category] ), [Sales Amount] ),
+    "Rank by Qty", RankByMetric( VALUES( 'Product'[Category] ), [Total Quantity] ),
+    "Rank by Margin", RankByMetric( VALUES( 'Product'[Category] ), [Margin] )
+)
+ORDER BY [Sales] DESC
+
+-- ============================================================
+-- DEMO 6: YoY REFACTORING — THE "AFTER" STATE
+-- Replace 4 duplicated measures with 1 function + one-liners
+-- Compare results against existing measures in the model
+-- ============================================================
+
+DEFINE
+
+FUNCTION Local.YoYChange = ( metricExpr : EXPR ) =>
+    VAR CurrentValue = CALCULATE( metricExpr )
+    VAR PriorValue =
+        CALCULATE( metricExpr, SAMEPERIODLASTYEAR( 'Date'[Date] ) )
+    RETURN
+        IF( PriorValue <> 0, DIVIDE( CurrentValue - PriorValue, PriorValue ) )
+
+MEASURE Sales[Revenue YoY % v2] = Local.YoYChange( [Sales Amount] )
+MEASURE Sales[Cost YoY % v2] = Local.YoYChange( [Total Cost] )
+MEASURE Sales[Margin YoY % v2] = Local.YoYChange( [Margin] )
+MEASURE Sales[Quantity YoY % v2] = Local.YoYChange( [Total Quantity] )
+
+EVALUATE
+SUMMARIZECOLUMNS(
+    'Date'[Year],
+    "Revenue YoY (old)", [Revenue YoY %],
+    "Revenue YoY (new)", [Revenue YoY % v2],
+    "Cost YoY (old)", [Cost YoY %],
+    "Cost YoY (new)", [Cost YoY % v2],
+    "Margin YoY (old)", [Margin YoY %],
+    "Margin YoY (new)", [Margin YoY % v2],
+    "Qty YoY (old)", [Quantity YoY %],
+    "Qty YoY (new)", [Quantity YoY % v2]
+)
+ORDER BY 'Date'[Year]
+
+
+-- ============================================================
+-- DEMO 7: MODEL-DEPENDENT WRAPPER
+-- Wrapping a generic function with model-specific defaults
+-- ============================================================
+
+DEFINE
+
+FUNCTION ComputeForColor = ( metricExpr : EXPR, colorValue : SCALAR VAL ) =>
+    CALCULATE (
+        metricExpr,
+        'Product'[Color] = colorValue
+    )
+
+FUNCTION Local.RedSales = () =>
+    ComputeForColor( [Sales Amount], "Red" )
+
+FUNCTION Local.BlackSales = () =>
+    ComputeForColor( [Sales Amount], "Black" )
+
+EVALUATE
+ROW(
+    "Red Sales", Local.RedSales(),
+    "Black Sales", Local.BlackSales(),
+    "Total Sales", [Sales Amount]
+)
